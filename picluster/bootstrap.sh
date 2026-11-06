@@ -2,11 +2,10 @@
 set -eo pipefail
 
 SESSION_NAME="picluster"
-REPO_DIR="${HOME}/picluster-bootstrap"
+REPO_NAME="pitools"
+REPO_DIR="${HOME}/${REPO_NAME}/picluster"
 LOG_FILE="/tmp/picluster-preflight.log"
-exec > >(tee -a "${LOG_FILE}") 2>&1
 
-# Colori e formattazione
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -18,12 +17,11 @@ draw_banner() {
     clear
     echo -e "${CYAN}${BOLD}╔════════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}${BOLD}║                     PICLUSTER ZERO-TOUCH ENGINE                            ║${NC}"
-    echo -e "${CYAN}${BOLD}║                Provisioning & High-Availability Automation                 ║${NC}"
+    echo -e "${CYAN}${BOLD}║                 Provisioning & High-Availability Automation                ║${NC}"
     echo -e "${CYAN}${BOLD}╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
-# Spinner grafico non bloccante per comandi lenti
 run_with_spinner() {
     local msg="$1"
     shift
@@ -93,30 +91,42 @@ install_apt_packages() {
 run_with_spinner "Download e installazione pacchetti di sistema" install_apt_packages
 
 # ------------------------------------------------------------------------------
-# 3. Wrapping trasparente in tmux
+# 3. Wrapping in tmux (Supporto Pipe curl e Terminale Diretto)
 # ------------------------------------------------------------------------------
 if [ -z "${TMUX:-}" ]; then
     echo ""
     echo -e "${BOLD}[Fase 3/4] Persistenza Sessione${NC}"
-    echo -e " ${GREEN}[✓]${NC} Avvio sessione autonoma ${CYAN}tmux:${SESSION_NAME}${NC}"
     
-    # Crea un runner temporaneo pulito che non scompare
+    if [ ! -d "${HOME}/${REPO_NAME}/.git" ]; then
+        run_with_spinner "Clonazione repository principale (${REPO_NAME})" git clone --quiet "https://github.com/6102610/${REPO_NAME}.git" "${HOME}/${REPO_NAME}"
+    else
+        echo -e " ${GREEN}[✓]${NC} Repository locale già presente in ${HOME}/${REPO_NAME}."
+        git -C "${HOME}/${REPO_NAME}" pull --quiet || true
+    fi
+
     RUNNER_SCRIPT="/tmp/picluster_exec.sh"
-    cat << 'RUNNER' > "${RUNNER_SCRIPT}"
+    cat << RUNNER > "${RUNNER_SCRIPT}"
 #!/usr/bin/env bash
-cd "${HOME}/picluster-bootstrap"
-# Riesegue questo stesso script ma all'interno dell'ambiente tmux
 export INSIDE_TMUX=1
-exec bash "${HOME}/picluster-bootstrap/bootstrap.sh"
+exec bash "${REPO_DIR}/bootstrap.sh"
 RUNNER
     chmod +x "${RUNNER_SCRIPT}"
 
-    # Clona il repo localmente se lanciato via curl remoto prima di passare a tmux
-    if [ ! -d "${REPO_DIR}/.git" ]; then
-        run_with_spinner "Clonazione repository principale" git clone --quiet "https://github.com/6102610/picluster-bootstrap.git" "${REPO_DIR}"
-    fi
+    tmux kill-session -t "${SESSION_NAME}" 2>/dev/null || true
+    # Avvio detached (-d): fondamentale per evitare l'errore "not a terminal"
+    tmux new-session -d -s "${SESSION_NAME}" "bash ${RUNNER_SCRIPT}"
 
-    exec tmux new-session -s "${SESSION_NAME}" "bash ${RUNNER_SCRIPT}"
+    echo -e " ${GREEN}[✓]${NC} Sessione ${CYAN}tmux:${SESSION_NAME}${NC} avviata in background."
+    echo ""
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        exec tmux attach-session -t "${SESSION_NAME}"
+    else
+        echo -e "${YELLOW}[!] Rilevata esecuzione via pipe (curl | bash).${NC}"
+        echo -e "${BOLD}Collegati per seguire i progressi e inserire le credenziali:${NC}"
+        echo -e "    ${CYAN}sudo tmux attach -t ${SESSION_NAME}${NC}"
+        exit 0
+    fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -135,16 +145,18 @@ setup_venv() {
 }
 run_with_spinner "Creazione Virtualenv e installazione moduli (Ansible/Rich)" setup_venv
 
-# Richiesta credenziali cluster se non esportate
+TTY_IN="/dev/tty"
+[ ! -c /dev/tty ] && TTY_IN="/dev/stdin"
+
 if [ -z "${CLUSTER_ADMIN_PASS:-}" ]; then
     echo ""
     echo -e "${BOLD}--- Configurazione Utente Amministratore Cluster ---${NC}"
-    read -r -p "Nome utente admin [default: giorgio]: " INP_USER
+    read -r -p "Nome utente admin [default: giorgio]: " INP_USER < "$TTY_IN"
     export CLUSTER_ADMIN_USER="${INP_USER:-giorgio}"
     while true; do
-        read -r -s -p "Password per utente '${CLUSTER_ADMIN_USER}': " PASS1
+        read -r -s -p "Password per utente '${CLUSTER_ADMIN_USER}': " PASS1 < "$TTY_IN"
         echo ""
-        read -r -s -p "Conferma password: " PASS2
+        read -r -s -p "Conferma password: " PASS2 < "$TTY_IN"
         echo ""
         if [ -n "${PASS1}" ] && [ "${PASS1}" = "${PASS2}" ]; then
             export CLUSTER_ADMIN_PASS="${PASS1}"
@@ -158,12 +170,11 @@ echo ""
 echo -e " ${GREEN}[✓]${NC} Ambiente pronto. Avvio dashboard orchestratore..."
 sleep 1
 
-# Esecuzione orchestratore mantenendo la shell aperta se si arresta
 source "${REPO_DIR}/.venv/bin/activate"
 cd "${REPO_DIR}"
 python3 orchestrator.py || {
     echo ""
-    echo -e "${RED}[!] L'orchestratore è uscito con un errore. Premi INVIO per la shell di debug.${NC}"
-    read -r
+    echo -e "${RED}[!] L'orchestratore è uscito con un errore. Premi INVIO per aprire una shell di debug.${NC}"
+    read -r < "$TTY_IN"
     bash
 }
