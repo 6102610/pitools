@@ -42,12 +42,25 @@ echo "----------------------------------------------------------"
 echo "Storage montato attualmente:"
 lsblk -o NAME,TYPE,SIZE,MOUNTPOINTS,MODEL
 
+# Controllo Negoziazione PCIe (se presente controller NVMe)
+if lspci -d ::0108 >/dev/null 2>&1; then
+    echo "----------------------------------------------------------"
+    echo "Stato Bus PCIe NVMe:"
+    LNK_STA=$(sudo lspci -vvv -d ::0108 2>/dev/null | grep -E "LnkSta:" | head -n1 || true)
+    if [[ -n "$LNK_STA" ]]; then
+        echo "  $LNK_STA"
+        if [[ "$LNK_STA" =~ "Speed 8GT/s" ]]; then
+            echo "  >> PCIe Gen 3 ATTIVO (8 GT/s) [VELOCITA MASSIMA]"
+        elif [[ "$LNK_STA" =~ "Speed 5GT/s" ]]; then
+            echo "  >> PCIe Gen 2 ATTIVO (5 GT/s)"
+        fi
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "Parametri Bootloader EEPROM:"
 
-# Funzione per attendere la fine dei task di post-installazione (cloud-init e APT)
 wait_for_apt_and_cloud_init() {
-    # 1. Attesa completamento cloud-init (se in esecuzione)
     if command -v cloud-init >/dev/null 2>&1; then
         local CI_STATUS
         CI_STATUS=$(cloud-init status 2>/dev/null || true)
@@ -57,14 +70,9 @@ wait_for_apt_and_cloud_init() {
         fi
     fi
 
-    # 2. Attesa rilascio lock APT / DPKG
     local TIMEOUT=120
     local ELAPSED=0
-    local LOCK_FILES=(
-        "/var/lib/dpkg/lock-frontend"
-        "/var/lib/dpkg/lock"
-        "/var/lib/apt/lists/lock"
-    )
+    local LOCK_FILES=("/var/lib/dpkg/lock-frontend" "/var/lib/dpkg/lock" "/var/lib/apt/lists/lock")
 
     while true; do
         local LOCKED=0
@@ -79,34 +87,22 @@ wait_for_apt_and_cloud_init() {
             LOCKED=1
         fi
 
-        if [[ $LOCKED -eq 0 ]]; then
-            break
-        fi
-
-        if [[ $ELAPSED -eq 0 ]]; then
-            echo "[*] Gestore pacchetti occupato in background. Attesa rilascio lock..."
-        fi
+        [[ $LOCKED -eq 0 ]] && break
 
         sleep 2
         ELAPSED=$((ELAPSED + 2))
-        if [[ $ELAPSED -ge $TIMEOUT ]]; then
-            echo "[WARN] Timeout di attesa lock APT ($TIMEOUT s) superato. Procedo comunque."
-            break
-        fi
+        [[ $ELAPSED -ge $TIMEOUT ]] && break
     done
 }
 
-# Se mancano i comandi per interrogare il firmware, installali attendendo il lock
 if ! command -v vcgencmd >/dev/null 2>&1 && ! command -v rpi-eeprom-config >/dev/null 2>&1; then
     echo "[*] Tool diagnostici EEPROM non trovati sul sistema..."
     if command -v apt-get >/dev/null 2>&1; then
         wait_for_apt_and_cloud_init
-        echo "[*] Installazione libraspberrypi-bin e rpi-eeprom in corso..."
         sudo apt-get update -qq && sudo apt-get install -y -qq libraspberrypi-bin rpi-eeprom >/dev/null 2>&1 || true
     fi
 fi
 
-# Lettura dei parametri con fallback
 CONFIG_OUT=""
 if command -v vcgencmd >/dev/null 2>&1; then
     CONFIG_OUT=$(sudo vcgencmd bootloader_config 2>/dev/null || true)
@@ -119,6 +115,6 @@ fi
 if [[ -n "$CONFIG_OUT" ]]; then
     echo "$CONFIG_OUT" | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
 else
-    echo "[WARN] Impossibile interrogare l'EEPROM (verifica che il pacchetto libraspberrypi-bin sia installato e riesegui con sudo)."
+    echo "[WARN] Impossibile interrogare l'EEPROM."
 fi
 echo "=========================================================="
