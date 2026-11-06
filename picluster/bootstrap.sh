@@ -3,7 +3,8 @@ set -eo pipefail
 
 REPO_NAME="pitools"
 REPO_DIR="${HOME}/${REPO_NAME}/picluster"
-LOG_FILE="/tmp/picluster-preflight.log"
+LOG_FILE="/tmp/picluster-preflight-${USER}.log"
+rm -f "${LOG_FILE}" 2>/dev/null || true
 
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
