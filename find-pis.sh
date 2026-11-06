@@ -1,75 +1,102 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-# Dipendenze consigliate: iproute2, arp-scan (oppure nmap / arp)
+# Prefissi OUI ufficiali Raspberry Pi Ltd / Trading / Foundation
+# Include: 98:fe:54, 28:cd:c1, b8:27:eb, dc:a6:32, e4:5f:01, d8:3a:dd, 2c:cf:67
+RPI_OUI="98:fe:54|28:cd:c1|b8:27:eb|dc:a6:32|e4:5f:01|d8:3a:dd|2c:cf:67"
+
 echo "=========================================================="
 echo "         Scansione Raspberry Pi nella Rete Locale         "
 echo "=========================================================="
 
-# 1. Rileva interfaccia di default e subnet locale
-DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1 || true)
-if [[ -z "$DEFAULT_IFACE" ]]; then
-    echo "[ERROR] Impossibile determinare l'interfaccia di rete primaria."
-    exit 1
+# 1. Rileva se stiamo girando in ambiente WSL o Linux nativo
+IS_WSL=0
+if grep -qi "microsoft" /proc/version 2>/dev/null && command -v powershell.exe >/dev/null 2>&1; then
+    IS_WSL=1
 fi
 
-LOCAL_CIDR=$(ip -o -f inet addr show dev "$DEFAULT_IFACE" | awk '{print $4}' | head -n1 || true)
-echo "[*] Interfaccia attiva : $DEFAULT_IFACE"
-echo "[*] Subnet rilevata     : $LOCAL_CIDR"
-echo "----------------------------------------------------------"
+SUBNET=""
+if [ $IS_WSL -eq 1 ]; then
+    echo "[*] Ambiente WSL2 rilevato: interrogazione scheda fisica Windows..."
+    WIN_IP_INFO=$(powershell.exe -NoProfile -Command "
+        Get-NetIPAddress -AddressFamily IPv4 |
+        Where-Object { \$_.InterfaceAlias -notmatch 'vEthernet|Loopback|WSL' -and \$_.IPAddress -notlike '169.254*' } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+    " 2>/dev/null | tr -d '\r')
 
-# OUI noti Raspberry Pi (Raspberry Pi Ltd / Trading / Foundation)
-# b8:27:eb, dc:a6:32, e4:5f:01, 28:cd:c1, d8:3a:dd, 2c:cf:67
-RPI_OUI_REGEX="(b8:27:eb|dc:a6:32|e4:5f:01|28:cd:c1|d8:3a:dd|2c:cf:67)"
-
-echo "Ricerca nodi in corso..."
-
-FOUND=0
-
-# Metodo 1: arp-scan (il più preciso e veloce se presente con privilegi sudo)
-if command -v arp-scan >/dev/null 2>&1 && [[ $EUID -eq 0 ]]; then
-    while read -r ip mac desc; do
-        if [[ "$mac" =~ $RPI_OUI_REGEX ]] || [[ "$desc" =~ [Rr]aspberry ]]; then
-            HOSTNAME=$(getent hosts "$ip" | awk '{print $2}' || echo "n/a")
-            printf "  [+] IP: %-15s | MAC: %-17s | Host: %s\n" "$ip" "$mac" "$HOSTNAME"
-            FOUND=$((FOUND + 1))
-        fi
-    done < <(arp-scan --interface="$DEFAULT_IFACE" --localnet 2>/dev/null | grep -E "([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}")
-
-# Metodo 2: Popolamento ARP cache tramite ping sweep e lettura ip neigh
-else
-    # Ping broadcast/sweep rapido per popolare la tabella ARP
-    SUBNET_PREFIX=$(echo "$LOCAL_CIDR" | cut -d'.' -f1-3)
-    
-    echo "[*] Generazione traffico ARP sulla subnet $SUBNET_PREFIX.0/24..."
-    for i in {1..254}; do
-        ping -c 1 -W 1 "$SUBNET_PREFIX.$i" >/dev/null 2>&1 &
-    done
-    wait
-
-    while read -r ip _ _ mac _; do
-        if [[ "$mac" =~ $RPI_OUI_REGEX ]]; then
-            HOSTNAME=$(getent hosts "$ip" | awk '{print $2}' || echo "n/a")
-            printf "  [+] IP: %-15s | MAC: %-17s | Host: %s\n" "$ip" "$mac" "$HOSTNAME"
-            FOUND=$((FOUND + 1))
-        fi
-    done < <(ip neigh show dev "$DEFAULT_IFACE" | grep -v FAILED)
-fi
-
-# Metodo 3: Lookup mDNS standard (avahi/zeroconf)
-echo "----------------------------------------------------------"
-echo "[*] Controllo host mDNS (raspberrypi.local):"
-for h in raspberrypi.local; do
-    if IP_MDNS=$(getent hosts "$h" 2>/dev/null | awk '{print $1}'); then
-        echo "  [mDNS] $h -> $IP_MDNS"
+    if [ -n "$WIN_IP_INFO" ]; then
+        SUBNET=$(echo "$WIN_IP_INFO" | cut -d'.' -f1-3)
+        echo "[+] Subnet fisica rilevata: ${SUBNET}.0/24 (Host IP: ${WIN_IP_INFO})"
     fi
-done
-
-echo "----------------------------------------------------------"
-if [[ $FOUND -eq 0 ]]; then
-    echo "[INFO] Nessun Raspberry Pi identificato tramite MAC OUI standard."
-    echo "Suggerimento: Esegui con 'sudo' o installa 'arp-scan' (sudo apt install arp-scan)."
-else
-    echo "[OK] Nodi Raspberry Pi trovati: $FOUND"
 fi
-echo "=========================================================="
+
+# Fallback se Linux nativo o se PowerShell fallisce
+if [ -z "$SUBNET" ]; then
+    DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n1 || true)
+    LOCAL_IP=$(ip -o -f inet addr show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{print $4}' | cut -d'/' -f1 | head -n1 || true)
+    if [ -n "$LOCAL_IP" ]; then
+        SUBNET=$(echo "$LOCAL_IP" | cut -d'.' -f1-3)
+        echo "[+] Subnet rilevata da Linux: ${SUBNET}.0/24 (IP: ${LOCAL_IP})"
+    else
+        read -rp "Impossibile determinare la subnet. Inserisci i primi 3 ottetti (es. 192.168.0): " SUBNET
+    fi
+fi
+
+echo "[*] Scansione host attivi con porta SSH (22) aperta su ${SUBNET}.1 - 254..."
+
+TMP_ACTIVE=$(mktemp)
+trap 'rm -f "$TMP_ACTIVE"' EXIT
+
+# Sweep rapido TCP porta 22 (timeout 400ms per IP)
+for i in $(seq 1 254); do
+    (
+        IP="${SUBNET}.${i}"
+        if timeout 0.4 bash -c "true &>/dev/null > /dev/tcp/${IP}/22" 2>/dev/null; then
+            echo "$IP" >> "$TMP_ACTIVE"
+        fi
+    ) &
+done
+wait
+
+ACTIVE_IPS=($(sort -V "$TMP_ACTIVE" 2>/dev/null || true))
+
+if [ ${#ACTIVE_IPS[@]} -eq 0 ]; then
+    echo "[-] Nessun host con porta 22 attiva trovato su ${SUBNET}.0/24."
+    exit 0
+fi
+
+echo "[+] Trovati ${#ACTIVE_IPS[@]} host con porta 22 aperta."
+echo "----------------------------------------------------------------------------------"
+printf "%-16s %-18s %-25s %-20s %s\n" "IP ADDRESS" "MAC ADDRESS" "VENDOR / BANNER" "HOSTNAME" "NOTE"
+echo "----------------------------------------------------------------------------------"
+
+for IP in "${ACTIVE_IPS[@]}"; do
+    MAC=""
+    if [ $IS_WSL -eq 1 ]; then
+        MAC=$(powershell.exe -NoProfile -Command "
+            Get-NetNeighbor -IPAddress '$IP' 2>\$null | Select-Object -ExpandProperty LinkLayerAddress
+        " 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]' | tr '-' ':')
+    else
+        MAC=$(ip neigh show "$IP" 2>/dev/null | awk '{print $5}')
+    fi
+    MAC=${MAC:-"<non in arp>"}
+
+    # Recupera il banner SSH se disponibile
+    BANNER=$(timeout 0.8 nc -nv -w 1 "$IP" 22 2>&1 | grep -i "SSH" | head -n1 | tr -d '\r' || true)
+
+    # Risoluzione hostname
+    HOST=$(timeout 0.5 getent hosts "$IP" 2>/dev/null | awk '{print $2}' || true)
+    if [ -z "$HOST" ]; then
+        HOST=$(timeout 0.5 ping -c 1 -W 1 -a "$IP" 2>/dev/null | grep -oP 'from \K[^\s]+' || true)
+        HOST=${HOST:-"-"}
+    fi
+
+    # Marcatura Raspberry Pi
+    TAG=""
+    if [[ "$MAC" =~ ^($RPI_OUI) ]] || [[ "$BANNER" =~ [Uu]buntu|[Dd]ebian|[Rr]aspbian ]] || [[ "$HOST" =~ pi ]]; then
+        TAG="[POSSIBILE PI]"
+    fi
+
+    printf "%-16s %-18s %-25s %-20s %s\n" "$IP" "$MAC" "${BANNER:0:24}" "${HOST:0:19}" "$TAG"
+done
+echo "----------------------------------------------------------------------------------"
