@@ -1,0 +1,149 @@
+---
+# ==============================================================================
+# 1. JOIN SEQUENZIALE DEI MASTER SECONDARI (CONTROL PLANE ETCD)
+# ==============================================================================
+- name: Join Sequenziale Master Secondari (k8s-master-02, k8s-master-03)
+  hosts: k8s_masters[1:]
+  serial: 1
+  gather_facts: true
+  become: true
+  vars:
+    cluster_vip: "192.168.20.100"
+    bootstrap_master_ip: "{{ hostvars[groups['k8s_masters'][0]]['ansible_host'] }}"
+    bootstrap_master_name: "{{ groups['k8s_masters'][0] }}"
+    k3s_config_dir: "/etc/rancher/k3s"
+    local_cluster_token_path: "{{ playbook_dir }}/../.cluster_token"
+
+  pre_tasks:
+    - name: Leggi il cluster token salvato sull'orchestratore
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.slurp:
+        src: "{{ local_cluster_token_path }}"
+      register: token_file_content
+
+    - name: Imposta il token come variabile
+      ansible.builtin.set_fact:
+        cluster_token: "{{ token_file_content.content | b64decode | trim }}"
+
+  tasks:
+    - name: Crea directory di configurazione /etc/rancher/k3s
+      ansible.builtin.file:
+        path: "{{ k3s_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Scrivi config.yaml per l'unione come server/control-plane
+      ansible.builtin.copy:
+        dest: "{{ k3s_config_dir }}/config.yaml"
+        content: |
+          server: "https://{{ bootstrap_master_ip }}:6443"
+          token: "{{ cluster_token }}"
+          tls-san:
+            - "{{ cluster_vip }}"
+            - "{{ ansible_host }}"
+            - "{{ inventory_hostname }}"
+          disable:
+            - servicelb
+            - traefik
+          flannel-backend: "vxlan"
+          node-ip: "{{ ansible_host }}"
+        owner: root
+        group: root
+        mode: '0640'
+
+    - name: Verifica se k3s è già attivo sul nodo
+      ansible.builtin.systemd:
+        name: k3s
+      register: k3s_check
+      ignore_errors: true
+
+    - name: Esegui installer K3s server per il join etcd
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -
+      when: k3s_check.failed or k3s_check.status.ActiveState != "active"
+
+    - name: etcd Guard - Attendi che il nodo passi in stato Ready su etcd/K3s
+      delegate_to: "{{ bootstrap_master_name }}"
+      ansible.builtin.command: k3s kubectl get node {{ inventory_hostname }}
+      register: node_ready_status
+      until: "'Ready' in node_ready_status.stdout"
+      retries: 30
+      delay: 5
+      changed_when: false
+
+# ==============================================================================
+# 2. JOIN PARALLELO DEI NODI WORKER
+# ==============================================================================
+- name: Join Parallelo Nodi Worker
+  hosts: k8s_workers
+  gather_facts: true
+  become: true
+  vars:
+    bootstrap_master_ip: "{{ hostvars[groups['k8s_masters'][0]]['ansible_host'] }}"
+    bootstrap_master_name: "{{ groups['k8s_masters'][0] }}"
+    k3s_config_dir: "/etc/rancher/k3s"
+    local_cluster_token_path: "{{ playbook_dir }}/../.cluster_token"
+
+  pre_tasks:
+    - name: Leggi il cluster token salvato sull'orchestratore
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.slurp:
+        src: "{{ local_cluster_token_path }}"
+      register: worker_token_file
+
+    - name: Imposta il token per i worker
+      ansible.builtin.set_fact:
+        cluster_token: "{{ worker_token_file.content | b64decode | trim }}"
+
+  tasks:
+    - name: Crea directory di configurazione per l'agent
+      ansible.builtin.file:
+        path: "{{ k3s_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Scrivi config.yaml per k3s-agent
+      ansible.builtin.copy:
+        dest: "{{ k3s_config_dir }}/config.yaml"
+        content: |
+          server: "https://{{ bootstrap_master_ip }}:6443"
+          token: "{{ cluster_token }}"
+          node-ip: "{{ ansible_host }}"
+        owner: root
+        group: root
+        mode: '0640'
+
+    - name: Verifica se k3s-agent è già attivo sul worker
+      ansible.builtin.systemd:
+        name: k3s-agent
+      register: k3s_agent_check
+      ignore_errors: true
+
+    - name: Esegui installer K3s in modalità Agent
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | K3S_URL="https://{{ bootstrap_master_ip }}:6443" K3S_TOKEN="{{ cluster_token }}" sh -
+      when: k3s_agent_check.failed or k3s_agent_check.status.ActiveState != "active"
+
+    - name: Attendi che il worker risulti visibile e in stato Ready
+      delegate_to: "{{ bootstrap_master_name }}"
+      ansible.builtin.command: k3s kubectl get node {{ inventory_hostname }}
+      register: worker_ready_status
+      until: "'Ready' in worker_ready_status.stdout"
+      retries: 25
+      delay: 5
+      changed_when: false
+
+    - name: Applica label esplicita di ruolo worker
+      delegate_to: "{{ bootstrap_master_name }}"
+      ansible.builtin.command: >
+        k3s kubectl label node {{ inventory_hostname }} node-role.kubernetes.io/worker=worker --overwrite
+      register: label_res
+      changed_when: "'labeled' in label_res.stdout"

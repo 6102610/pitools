@@ -1,0 +1,46 @@
+---
+- name: Hardening utente e assegnazione Hostname sequenziale
+hosts: all
+become: true
+gather_facts: true
+tasks:
+- name: Determina indice sequenziale del nodo
+  ansible.builtin.set_fact:
+    current_index: "{{ node_index | default(1) | int }}"
+
+- name: Costruisci stringa hostname (k3s-pi-0X)
+  ansible.builtin.set_fact:
+    target_hostname: "{{ 'k3s-pi-%02d' | format(current_index) }}"
+
+- name: Disabilita il modulo set_hostname di cloud-init se presente
+  ansible.builtin.lineinfile:
+    path: /etc/cloud/cloud.cfg
+    regexp: '^\s*-\s*set_hostname'
+    state: absent
+  when: ansible_distribution == 'Ubuntu'
+
+- name: Imposta l'hostname persistente di sistema
+  ansible.builtin.hostname:
+    name: "{{ target_hostname }}"
+
+- name: Aggiorna /etc/hosts con la corretta risoluzione locale
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s+.*'
+    line: "127.0.1.1 {{ target_hostname }}"
+    state: present
+
+- name: Garantisci presenza utente amministratore
+  ansible.builtin.user:
+    name: "{{ lookup('env', 'CLUSTER_ADMIN_USER') | default('giorgio', true) }}"
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    state: present
+
+- name: Configura sudo senza password per l'amministratore
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/99-{{ lookup('env', 'CLUSTER_ADMIN_USER') | default('giorgio', true) }}-nopasswd"
+    content: "{{ lookup('env', 'CLUSTER_ADMIN_USER') | default('giorgio', true) }} ALL=(ALL) NOPASSWD:ALL\n"
+    mode: '0440'
+    validate: 'visudo -cf %s'

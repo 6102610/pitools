@@ -1,0 +1,93 @@
+---
+- name: Inizializzazione Control Plane Primario K3s (Master 01)
+  hosts: k8s_masters[0]
+  gather_facts: true
+  become: true
+  vars:
+    cluster_vip: "192.168.20.100"
+    k3s_config_dir: "/etc/rancher/k3s"
+    local_cluster_token_path: "{{ playbook_dir }}/../.cluster_token"
+    admin_kubeconfig_path: "{{ lookup('env', 'HOME') }}/.kube/config"
+
+  pre_tasks:
+    - name: Genera un cluster token casuale e univoco sull'orchestratore se assente
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        if [ ! -f "{{ local_cluster_token_path }}" ]; then
+          openssl rand -hex 32 > "{{ local_cluster_token_path }}"
+          chmod 0600 "{{ local_cluster_token_path }}"
+        fi
+        cat "{{ local_cluster_token_path }}"
+      register: generated_cluster_token
+      changed_when: false
+
+  tasks:
+    - name: Crea directory di configurazione /etc/rancher/k3s
+      ansible.builtin.file:
+        path: "{{ k3s_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configura il file /etc/rancher/k3s/config.yaml per il bootstrap
+      ansible.builtin.copy:
+        dest: "{{ k3s_config_dir }}/config.yaml"
+        content: |
+          cluster-init: true
+          token: "{{ generated_cluster_token.stdout }}"
+          tls-san:
+            - "{{ cluster_vip }}"
+            - "{{ ansible_host }}"
+            - "{{ inventory_hostname }}"
+          disable:
+            - servicelb
+            - traefik
+          flannel-backend: "vxlan"
+          node-ip: "{{ ansible_default_ipv4.address }}"
+        owner: root
+        group: root
+        mode: '0640'
+
+    - name: Verifica se il servizio k3s è già attivo
+      ansible.builtin.systemd:
+        name: k3s
+      register: k3s_service_status
+      ignore_errors: true
+
+    - name: Scarica ed esegui l'installer di K3s se non installato
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -
+      when: k3s_service_status.failed or k3s_service_status.status.ActiveState != "active"
+
+    - name: Attendi che l'API server risponda su https://127.0.0.1:6443/readyz
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:6443/readyz"
+        validate_certs: false
+        status_code: 200
+      register: readyz_check
+      until: readyz_check.status == 200
+      retries: 30
+      delay: 5
+
+    - name: Recupera il kubeconfig generato da K3s
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: k3s_yaml_content
+
+    - name: Salva il kubeconfig locale sull'orchestratore puntando al VIP
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.copy:
+        dest: "{{ admin_kubeconfig_path }}"
+        content: "{{ k3s_yaml_content.content | b64decode | regex_replace('127\\.0\\.0\\.1:6443', cluster_vip + ':6443') }}"
+        mode: '0600'
+
+    - name: Verifica con k3s kubectl che il nodo master 01 sia Ready
+      ansible.builtin.command: k3s kubectl get node {{ inventory_hostname }}
+      register: kubectl_node_status
+      changed_when: false
+      failed_when: "'Ready' not in kubectl_node_status.stdout"

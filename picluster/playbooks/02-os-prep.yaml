@@ -1,0 +1,107 @@
+---
+- name: Hardening OS, Swap, Wi-Fi e Cgroups per K3s
+  hosts: k8s_cluster
+  gather_facts: true
+  become: true
+
+  tasks:
+    # ---------------------------------------------------------
+    # 1. GESTIONE SWAPFILE (2GB) & SWAPPINESS
+    # ---------------------------------------------------------
+    - name: Verifica presenza dello swapfile /swapfile
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swapfile_stat
+
+    - name: Crea lo swapfile da 2GB se assente
+      ansible.builtin.command: fallocate -l 2G /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Imposta permessi restrittivi 0600 su /swapfile
+      ansible.builtin.file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Formatta lo swapfile con mkswap
+      ansible.builtin.command: mkswap /swapfile
+      when: not swapfile_stat.stat.exists
+
+    - name: Aggiungi /swapfile a /etc/fstab per persistenza
+      ansible.posix.mount:
+        name: none
+        src: /swapfile
+        fstype: swap
+        opts: sw
+        state: present
+
+    - name: Attiva lo swapfile
+      ansible.builtin.command: swapon -a
+      when: not swapfile_stat.stat.exists
+      ignore_errors: true
+
+    - name: Configura vm.swappiness=10 in sysctl
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: '10'
+        state: present
+        reload: true
+
+    # ---------------------------------------------------------
+    # 2. DISATTIVAZIONE WI-FI E MODULI RADIO
+    # ---------------------------------------------------------
+    - name: Blacklist del modulo Wi-Fi Broadcom
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/raspi-blacklist.conf
+        content: |
+          blacklist brcmfmac
+          blacklist brcmutil
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Esegui soft-block Wi-Fi con rfkill se disponibile
+      ansible.builtin.command: rfkill block wifi
+      failed_when: false
+
+    # ---------------------------------------------------------
+    # 3. CONFIGURAZIONE CGROUPS NEL BOOTLOADER RASPBERRY PI
+    # ---------------------------------------------------------
+    - name: Individua il path di cmdline.txt (/boot/firmware o /boot)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /boot/firmware/cmdline.txt
+        - /boot/cmdline.txt
+      register: cmdline_check
+
+    - name: Imposta la variabile del percorso cmdline
+      ansible.builtin.set_fact:
+        cmdline_path: "{{ (cmdline_check.results | selectattr('stat.exists', 'equalto', true) | map(attribute='item') | list).0 }}"
+
+    - name: Leggi il contenuto attuale di cmdline.txt
+      ansible.builtin.slurp:
+        src: "{{ cmdline_path }}"
+      register: cmdline_content
+
+    - name: Verifica se i flag cgroups sono già configurati
+      ansible.builtin.set_fact:
+        cgroups_already_configured: "{{ 'cgroup_enable=cpuset' in (cmdline_content.content | b64decode) and 'cgroup_enable=memory' in (cmdline_content.content | b64decode) }}"
+
+    - name: Inserisci flag cgroup in cmdline.txt (mantenendo su riga singola)
+      ansible.builtin.replace:
+        path: "{{ cmdline_path }}"
+        regexp: '^(.*)$'
+        replace: '\1 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory'
+      when: not cgroups_already_configured
+      notify: Reboot nodo per applicare cgroups
+
+  handlers:
+    - name: Reboot nodo per applicare cgroups
+      ansible.builtin.reboot:
+        msg: "Reboot coordinato da Ansible per abilitare i cgroup memory/cpuset"
+        reboot_timeout: 300
+        connect_timeout: 20
+        pre_reboot_delay: 2
+        post_reboot_delay: 10

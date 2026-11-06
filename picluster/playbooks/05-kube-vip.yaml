@@ -1,0 +1,48 @@
+---
+- name: Deploy Kube-VIP DaemonSet, Taints Control-Plane e Validazione HA
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Attendi che /etc/rancher/k3s/k3s.yaml sia generato
+      ansible.builtin.wait_for:
+        path: /etc/rancher/k3s/k3s.yaml
+        state: present
+        timeout: 60
+
+    - name: Attendi che K3s API Server risponda sulla porta 6443
+      ansible.builtin.wait_for:
+        port: 6443
+        host: 127.0.0.1
+        state: started
+        timeout: 60
+
+    - name: Attendi che i nodi siano pronti via kubectl
+      ansible.builtin.command:
+        cmd: k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes
+      register: nodes_check
+      retries: 15
+      delay: 5
+      until: nodes_check.rc == 0
+
+    - name: Applica configurazione RBAC ufficiale di Kube-VIP
+      ansible.builtin.command:
+        cmd: k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f https://kube-vip.io/manifests/rbac.yaml
+      changed_when: false
+
+    - name: Prepara Kubeconfig per l'utente locale
+      ansible.builtin.file:
+        path: "/home/{{ lookup('env', 'USER') | default('giorgio', true) }}/.kube"
+        state: directory
+        mode: '0755'
+        owner: "{{ lookup('env', 'USER') | default('giorgio', true) }}"
+        group: "{{ lookup('env', 'USER') | default('giorgio', true) }}"
+
+    - name: Copia k3s.yaml in ~/.kube/config
+      ansible.builtin.copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "/home/{{ lookup('env', 'USER') | default('giorgio', true) }}/.kube/config"
+        remote_src: true
+        mode: '0600'
+        owner: "{{ lookup('env', 'USER') | default('giorgio', true) }}"
+        group: "{{ lookup('env', 'USER') | default('giorgio', true) }}"
