@@ -44,11 +44,19 @@ lsblk -o NAME,TYPE,SIZE,MOUNTPOINTS,MODEL
 
 echo "----------------------------------------------------------"
 echo "Parametri Bootloader EEPROM:"
+
+# Su Ubuntu/Debian assicura la presenza di libraspberrypi-bin o rpi-eeprom
+if ! command -v vcgencmd >/dev/null 2>&1 && ! command -v rpi-eeprom-config >/dev/null 2>&1; then
+    echo "[*] Tool EEPROM non trovati. Tentativo di installazione..."
+    sudo apt-get update -qq && sudo apt-get install -y -qq libraspberrypi-bin rpi-eeprom >/dev/null 2>&1 || true
+fi
+
+# Lettura configurazione attiva
 if command -v vcgencmd >/dev/null 2>&1; then
-    vcgencmd bootloader_config | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
+    sudo vcgencmd bootloader_config 2>/dev/null | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
 elif command -v rpi-eeprom-config >/dev/null 2>&1; then
-    rpi-eeprom-config | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
+    sudo rpi-eeprom-config 2>/dev/null | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
 else
-    echo "[INFO] Strumenti vcgencmd / rpi-eeprom non installati nel SO corrente."
+    echo "[WARN] Impossibile leggere la configurazione EEPROM (libraspberrypi-bin mancante)."
 fi
 echo "=========================================================="
