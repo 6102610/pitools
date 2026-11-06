@@ -45,18 +45,80 @@ lsblk -o NAME,TYPE,SIZE,MOUNTPOINTS,MODEL
 echo "----------------------------------------------------------"
 echo "Parametri Bootloader EEPROM:"
 
-# Su Ubuntu/Debian assicura la presenza di libraspberrypi-bin o rpi-eeprom
+# Funzione per attendere la fine dei task di post-installazione (cloud-init e APT)
+wait_for_apt_and_cloud_init() {
+    # 1. Attesa completamento cloud-init (se in esecuzione)
+    if command -v cloud-init >/dev/null 2>&1; then
+        local CI_STATUS
+        CI_STATUS=$(cloud-init status 2>/dev/null || true)
+        if [[ "$CI_STATUS" =~ "running" ]]; then
+            echo "[*] cloud-init in corso: attesa completamento primo avvio..."
+            cloud-init status --wait >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # 2. Attesa rilascio lock APT / DPKG
+    local TIMEOUT=120
+    local ELAPSED=0
+    local LOCK_FILES=(
+        "/var/lib/dpkg/lock-frontend"
+        "/var/lib/dpkg/lock"
+        "/var/lib/apt/lists/lock"
+    )
+
+    while true; do
+        local LOCKED=0
+        for lock in "${LOCK_FILES[@]}"; do
+            if [[ -f "$lock" ]] && fuser "$lock" >/dev/null 2>&1; then
+                LOCKED=1
+                break
+            fi
+        done
+
+        if pgrep -f "unattended-upgrade|apt.systemd.daily" >/dev/null 2>&1; then
+            LOCKED=1
+        fi
+
+        if [[ $LOCKED -eq 0 ]]; then
+            break
+        fi
+
+        if [[ $ELAPSED -eq 0 ]]; then
+            echo "[*] Gestore pacchetti occupato in background. Attesa rilascio lock..."
+        fi
+
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
+        if [[ $ELAPSED -ge $TIMEOUT ]]; then
+            echo "[WARN] Timeout di attesa lock APT ($TIMEOUT s) superato. Procedo comunque."
+            break
+        fi
+    done
+}
+
+# Se mancano i comandi per interrogare il firmware, installali attendendo il lock
 if ! command -v vcgencmd >/dev/null 2>&1 && ! command -v rpi-eeprom-config >/dev/null 2>&1; then
-    echo "[*] Tool EEPROM non trovati. Tentativo di installazione..."
-    sudo apt-get update -qq && sudo apt-get install -y -qq libraspberrypi-bin rpi-eeprom >/dev/null 2>&1 || true
+    echo "[*] Tool diagnostici EEPROM non trovati sul sistema..."
+    if command -v apt-get >/dev/null 2>&1; then
+        wait_for_apt_and_cloud_init
+        echo "[*] Installazione libraspberrypi-bin e rpi-eeprom in corso..."
+        sudo apt-get update -qq && sudo apt-get install -y -qq libraspberrypi-bin rpi-eeprom >/dev/null 2>&1 || true
+    fi
 fi
 
-# Lettura configurazione attiva
+# Lettura dei parametri con fallback
+CONFIG_OUT=""
 if command -v vcgencmd >/dev/null 2>&1; then
-    sudo vcgencmd bootloader_config 2>/dev/null | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
-elif command -v rpi-eeprom-config >/dev/null 2>&1; then
-    sudo rpi-eeprom-config 2>/dev/null | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
+    CONFIG_OUT=$(sudo vcgencmd bootloader_config 2>/dev/null || true)
+fi
+
+if [[ -z "$CONFIG_OUT" ]] && command -v rpi-eeprom-config >/dev/null 2>&1; then
+    CONFIG_OUT=$(sudo rpi-eeprom-config 2>/dev/null || true)
+fi
+
+if [[ -n "$CONFIG_OUT" ]]; then
+    echo "$CONFIG_OUT" | grep -E "BOOT_ORDER|PCIE_PROBE|USB_MSD" || true
 else
-    echo "[WARN] Impossibile leggere la configurazione EEPROM (libraspberrypi-bin mancante)."
+    echo "[WARN] Impossibile interrogare l'EEPROM (verifica che il pacchetto libraspberrypi-bin sia installato e riesegui con sudo)."
 fi
 echo "=========================================================="
