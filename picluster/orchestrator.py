@@ -105,7 +105,7 @@ def evaluate_topology_and_heal():
         worker_to_promote = workers[0]["name"]
         console.print(f"[bold cyan][*] Raggiunti {total_valid} nodi totali. Promozione di {worker_to_promote} a Master...[/]")
         subprocess.run(
-            f"ansible-playbook -i '{worker_to_promote},' playbooks/promote-worker.yaml -e target_node={worker_to_promote} 2>/dev/null",
+            f"sudo ansible-playbook -i '{worker_to_promote},' playbooks/promote-worker.yaml -e target_node={worker_to_promote} 2>/dev/null",
             shell=True
         )
 
@@ -131,8 +131,16 @@ def run_bootstrap_stages(net_info):
 
         for playbook, desc, extra_vars in stages:
             stage_task = progress.add_task(f"[yellow]-> {desc}...", total=100)
-            cmd = f"ansible-playbook -i 'localhost,' -c local playbooks/{playbook}.yaml {extra_vars} >> /tmp/ansible-pipeline.log 2>&1"
-            subprocess.run(cmd, shell=True)
+            
+            # Esecuzione con sudo per garantire l'accesso ai percorsi di sistema
+            cmd = f"sudo ansible-playbook -i 'localhost,' -c local playbooks/{playbook}.yaml {extra_vars} >> /tmp/ansible-pipeline.log 2>&1"
+            res = subprocess.run(cmd, shell=True)
+            
+            if res.returncode != 0:
+                console.print(f"\n[bold red][✗] Errore critico nel playbook {playbook}.yaml![/]")
+                console.print("[yellow]Consulta i dettagli dell'errore con: cat /tmp/ansible-pipeline.log[/]\n")
+                sys.exit(1)
+
             for _ in range(10):
                 time.sleep(0.08)
                 progress.advance(stage_task, 10)

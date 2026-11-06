@@ -1,5 +1,5 @@
 ---
-- name: Hardening OS, Swap, Wi-Fi e Cgroups per K3s
+- name: Hardening OS, Swap e Cgroups per K3s
   hosts: all
   gather_facts: true
   become: true
@@ -49,24 +49,7 @@
         reload: true
 
     # ---------------------------------------------------------
-    # 2. DISATTIVAZIONE WI-FI E MODULI RADIO
-    # ---------------------------------------------------------
-    - name: Blacklist del modulo Wi-Fi Broadcom
-      ansible.builtin.copy:
-        dest: /etc/modprobe.d/raspi-blacklist.conf
-        content: |
-          blacklist brcmfmac
-          blacklist brcmutil
-        owner: root
-        group: root
-        mode: '0644'
-
-    - name: Esegui soft-block Wi-Fi con rfkill se disponibile
-      ansible.builtin.command: rfkill block wifi
-      failed_when: false
-
-    # ---------------------------------------------------------
-    # 3. CONFIGURAZIONE CGROUPS NEL BOOTLOADER RASPBERRY PI
+    # 2. CONFIGURAZIONE CGROUPS NEL BOOTLOADER
     # ---------------------------------------------------------
     - name: Individua il path di cmdline.txt (/boot/firmware o /boot)
       ansible.builtin.stat:
@@ -89,19 +72,9 @@
       ansible.builtin.set_fact:
         cgroups_already_configured: "{{ 'cgroup_enable=cpuset' in (cmdline_content.content | b64decode) and 'cgroup_enable=memory' in (cmdline_content.content | b64decode) }}"
 
-    - name: Inserisci flag cgroup in cmdline.txt (mantenendo su riga singola)
+    - name: Inserisci flag cgroup in cmdline.txt (mantenendo riga singola)
       ansible.builtin.replace:
         path: "{{ cmdline_path }}"
         regexp: '^(.*)$'
         replace: '\1 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory'
       when: not cgroups_already_configured
-      notify: Reboot nodo per applicare cgroups
-
-  handlers:
-    - name: Reboot nodo per applicare cgroups
-      ansible.builtin.reboot:
-        msg: "Reboot coordinato da Ansible per abilitare i cgroup memory/cpuset"
-        reboot_timeout: 300
-        connect_timeout: 20
-        pre_reboot_delay: 2
-        post_reboot_delay: 10
