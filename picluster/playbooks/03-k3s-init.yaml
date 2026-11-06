@@ -1,6 +1,6 @@
 ---
 - name: Inizializzazione Control Plane Primario K3s (Master 01)
-  hosts: k8s_masters[0]
+  hosts: all[0]
   gather_facts: true
   become: true
   vars:

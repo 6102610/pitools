@@ -1,6 +1,6 @@
 ---
 - name: Hardening OS, Swap, Wi-Fi e Cgroups per K3s
-  hosts: k8s_cluster
+  hosts: all
   gather_facts: true
   become: true
 
