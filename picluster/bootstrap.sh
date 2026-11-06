@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-SESSION_NAME="picluster"
 REPO_NAME="pitools"
 REPO_DIR="${HOME}/${REPO_NAME}/picluster"
 LOG_FILE="/tmp/picluster-preflight.log"
@@ -61,7 +60,7 @@ wait_count=0
 while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
       fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
       fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
-    printf "\r ${YELLOW}[!]${NC} In attesa rilascio lock da Ubuntu unattended-upgrades (%3ds)..." "${wait_count}"
+    printf "\r ${YELLOW}[!]${NC} In attesa rilascio lock apt (%3ds)..." "${wait_count}"
     sleep 3
     wait_count=$((wait_count + 3))
     if [ ${wait_count} -ge 300 ]; then
@@ -86,53 +85,25 @@ install_apt_packages() {
     sudo apt-get install -y -qq \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" \
-        tmux git curl python3 python3-pip python3-venv arp-scan
+        git curl python3 python3-pip python3-venv arp-scan
 }
 run_with_spinner "Download e installazione pacchetti di sistema" install_apt_packages
 
 # ------------------------------------------------------------------------------
-# 3. Wrapping in tmux (Supporto Pipe curl e Terminale Diretto)
+# 3. Download/Aggiornamento Repository Locale
 # ------------------------------------------------------------------------------
-if [ -z "${TMUX:-}" ]; then
-    echo ""
-    echo -e "${BOLD}[Fase 3/4] Persistenza Sessione${NC}"
-    
-    if [ ! -d "${HOME}/${REPO_NAME}/.git" ]; then
-        run_with_spinner "Clonazione repository principale (${REPO_NAME})" git clone --quiet "https://github.com/6102610/${REPO_NAME}.git" "${HOME}/${REPO_NAME}"
-    else
-        echo -e " ${GREEN}[✓]${NC} Repository locale già presente in ${HOME}/${REPO_NAME}."
-        git -C "${HOME}/${REPO_NAME}" pull --quiet || true
-    fi
-
-    RUNNER_SCRIPT="/tmp/picluster_exec.sh"
-    cat << RUNNER > "${RUNNER_SCRIPT}"
-#!/usr/bin/env bash
-export INSIDE_TMUX=1
-exec bash "${REPO_DIR}/bootstrap.sh"
-RUNNER
-    chmod +x "${RUNNER_SCRIPT}"
-
-    tmux kill-session -t "${SESSION_NAME}" 2>/dev/null || true
-    # Avvio detached (-d): fondamentale per evitare l'errore "not a terminal"
-    tmux new-session -d -s "${SESSION_NAME}" "bash ${RUNNER_SCRIPT}"
-
-    echo -e " ${GREEN}[✓]${NC} Sessione ${CYAN}tmux:${SESSION_NAME}${NC} avviata in background."
-    echo ""
-
-    if [ -t 0 ] && [ -t 1 ]; then
-        exec tmux attach-session -t "${SESSION_NAME}"
-    else
-        echo -e "${YELLOW}[!] Rilevata esecuzione via pipe (curl | bash).${NC}"
-        echo -e "${BOLD}Collegati per seguire i progressi e inserire le credenziali:${NC}"
-        echo -e "    ${CYAN}sudo tmux attach -t ${SESSION_NAME}${NC}"
-        exit 0
-    fi
+echo ""
+echo -e "${BOLD}[Fase 3/4] Sincronizzazione Repository${NC}"
+if [ ! -d "${HOME}/${REPO_NAME}/.git" ]; then
+    run_with_spinner "Clonazione repository ${REPO_NAME}" git clone --quiet "https://github.com/6102610/${REPO_NAME}.git" "${HOME}/${REPO_NAME}"
+else
+    run_with_spinner "Aggiornamento repository ${REPO_NAME}" git -C "${HOME}/${REPO_NAME}" pull --quiet
 fi
 
 # ------------------------------------------------------------------------------
-# 4. Configurazione Ambiente Python e Avvio Orchestratore (Dentro tmux)
+# 4. Ambiente Python e Avvio Orchestratore
 # ------------------------------------------------------------------------------
-draw_banner
+echo ""
 echo -e "${BOLD}[Fase 4/4] Inizializzazione Motore Ansible & Python${NC}"
 
 setup_venv() {
@@ -143,38 +114,31 @@ setup_venv() {
     pip install --upgrade pip --quiet
     pip install rich pyyaml ansible --quiet
 }
-run_with_spinner "Creazione Virtualenv e installazione moduli (Ansible/Rich)" setup_venv
+run_with_spinner "Creazione Virtualenv e dipendenze" setup_venv
 
-TTY_IN="/dev/tty"
-[ ! -c /dev/tty ] && TTY_IN="/dev/stdin"
+# Input credenziali da terminale attivo
+echo ""
+echo -e "${BOLD}--- Configurazione Utente Amministratore Cluster ---${NC}"
+read -r -p "Nome utente admin [default: giorgio]: " INP_USER
+export CLUSTER_ADMIN_USER="${INP_USER:-giorgio}"
 
-if [ -z "${CLUSTER_ADMIN_PASS:-}" ]; then
+while true; do
+    read -r -s -p "Password per utente '${CLUSTER_ADMIN_USER}': " PASS1
     echo ""
-    echo -e "${BOLD}--- Configurazione Utente Amministratore Cluster ---${NC}"
-    read -r -p "Nome utente admin [default: giorgio]: " INP_USER < "$TTY_IN"
-    export CLUSTER_ADMIN_USER="${INP_USER:-giorgio}"
-    while true; do
-        read -r -s -p "Password per utente '${CLUSTER_ADMIN_USER}': " PASS1 < "$TTY_IN"
-        echo ""
-        read -r -s -p "Conferma password: " PASS2 < "$TTY_IN"
-        echo ""
-        if [ -n "${PASS1}" ] && [ "${PASS1}" = "${PASS2}" ]; then
-            export CLUSTER_ADMIN_PASS="${PASS1}"
-            break
-        fi
-        echo -e "${RED}[!] Le password non coincidono. Riprova.${NC}"
-    done
-fi
+    read -r -s -p "Conferma password: " PASS2
+    echo ""
+    if [ -n "${PASS1}" ] && [ "${PASS1}" = "${PASS2}" ]; then
+        export CLUSTER_ADMIN_PASS="${PASS1}"
+        break
+    fi
+    echo -e "${RED}[!] Le password non coincidono. Riprova.${NC}"
+done
 
 echo ""
 echo -e " ${GREEN}[✓]${NC} Ambiente pronto. Avvio dashboard orchestratore..."
 sleep 1
 
+# Esecuzione diretta dell'orchestratore sul terminale corrente
 source "${REPO_DIR}/.venv/bin/activate"
 cd "${REPO_DIR}"
-python3 orchestrator.py || {
-    echo ""
-    echo -e "${RED}[!] L'orchestratore è uscito con un errore. Premi INVIO per aprire una shell di debug.${NC}"
-    read -r < "$TTY_IN"
-    bash
-}
+python3 orchestrator.py

@@ -14,8 +14,8 @@ from rich.text import Text
 console = Console()
 
 def get_network_info():
-wlan_ip = None
-wlan_subnet = None
+    wlan_ip = None
+    wlan_subnet = None
 
 try:
     out = subprocess.check_output("ip -o -f inet addr show dev wlan0 2>/dev/null", shell=True).decode()
