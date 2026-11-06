@@ -44,37 +44,51 @@ else
     echo "[OK] Sistema avviato correttamente da microSD ($ROOT_DEV)."
 fi
 
-# 2. Rileva la presenza della chiavetta USB
-USB_BOOT_DEV=""
-for dev in /dev/sd[a-z]1; do
+# 2. Rileva la presenza della partizione di boot esterna (USB o NVMe)
+EXT_BOOT_DEV=""
+for dev in /dev/sd[a-z]1 /dev/nvme[0-9]n[0-9]p1; do
     if [[ -b "$dev" ]]; then
-        USB_BOOT_DEV="$dev"
+        EXT_BOOT_DEV="$dev"
         break
     fi
 done
 
-if [[ -z "$USB_BOOT_DEV" ]]; then
-    echo "[ERROR] Nessuna partizione di boot USB rilevata (/dev/sd*1). Inserisci la chiavetta USB e riprova."
+if [[ -z "$EXT_BOOT_DEV" ]]; then
+    echo "[ERROR] Nessuna partizione di boot esterna rilevata (/dev/sd*1 o /dev/nvme*p1). Collega il supporto e riprova."
     exit 1
 fi
-echo "[OK] Rilevata partizione boot USB: $USB_BOOT_DEV"
+echo "[OK] Rilevata partizione boot di destinazione: $EXT_BOOT_DEV"
 
-# 3. Configurazione erogazione USB (necessaria solo su Pi 5)
+# 3. Configurazione PCIe Gen 3 e corrente USB (specifica Pi 5)
 if [[ $IS_PI5 -eq 1 ]]; then
-    echo "[*] Rilevato Pi 5: configurazione usb_max_current_enable=1..."
-    
+    echo "[*] Rilevato Pi 5: configurazione usb_max_current_enable e PCIe Gen 3..."
+
+    configure_pi5_firmware_file() {
+        local target_file="$1"
+        [[ -f "$target_file" ]] || touch "$target_file"
+
+        if ! grep -q "^usb_max_current_enable=1" "$target_file"; then
+            echo "usb_max_current_enable=1" >> "$target_file"
+        fi
+        if ! grep -q "^dtparam=pciex1" "$target_file"; then
+            echo "dtparam=pciex1" >> "$target_file"
+        fi
+        if ! grep -q "^dtparam=pciex1_gen=3" "$target_file"; then
+            echo "dtparam=pciex1_gen=3" >> "$target_file"
+        fi
+    }
+
     LOCAL_BOOT_CONF="/boot/firmware/config.txt"
     [[ ! -f "$LOCAL_BOOT_CONF" && -f "/boot/config.txt" ]] && LOCAL_BOOT_CONF="/boot/config.txt"
 
     if [[ -f "$LOCAL_BOOT_CONF" ]]; then
-        if ! grep -q "^usb_max_current_enable=1" "$LOCAL_BOOT_CONF"; then
-            echo "usb_max_current_enable=1" >> "$LOCAL_BOOT_CONF"
-            echo "[OK] Aggiunto a $LOCAL_BOOT_CONF (microSD)."
-        fi
+        configure_pi5_firmware_file "$LOCAL_BOOT_CONF"
+        echo "[OK] Parametri PCIe Gen 3 e USB configurati su microSD ($LOCAL_BOOT_CONF)."
     fi
 
     MOUNT_DIR=$(mktemp -d)
-    mount "$USB_BOOT_DEV" "$MOUNT_DIR"
+    mount "$EXT_BOOT_DEV" "$MOUNT_DIR"
+    
     TARGET_CONF=""
     if [[ -f "$MOUNT_DIR/usercfg.txt" ]]; then
         TARGET_CONF="$MOUNT_DIR/usercfg.txt"
@@ -82,18 +96,16 @@ if [[ $IS_PI5 -eq 1 ]]; then
         TARGET_CONF="$MOUNT_DIR/config.txt"
     else
         TARGET_CONF="$MOUNT_DIR/config.txt"
-        touch "$TARGET_CONF"
     fi
 
-    if ! grep -q "^usb_max_current_enable=1" "$TARGET_CONF" 2>/dev/null; then
-        echo "usb_max_current_enable=1" >> "$TARGET_CONF"
-        echo "[OK] Aggiunto a $(basename "$TARGET_CONF") (USB)."
-    fi
+    configure_pi5_firmware_file "$TARGET_CONF"
+    echo "[OK] Parametri PCIe Gen 3 e USB configurati su supporto esterno ($(basename "$TARGET_CONF"))."
+
     sync
     umount "$MOUNT_DIR"
     rmdir "$MOUNT_DIR"
 else
-    echo "[INFO] Raspberry Pi 4 non necessita del flag usb_max_current_enable."
+    echo "[INFO] Raspberry Pi 4: parametri PCIe Gen 3 e usb_max_current non applicabili."
 fi
 
 # 4. Stabilizzazione NetworkManager e Netplan (MAC fisico hardware)
@@ -142,7 +154,6 @@ fi
 CURRENT_CONF=$(rpi-eeprom-config)
 NEW_CONF_FILE=$(mktemp)
 
-# Rimuove direttive obsolete
 echo "$CURRENT_CONF" | grep -v -E "^(BOOT_ORDER|PCIE_PROBE|USB_MSD_PWR_OFF_TIME|USB_MSD_DISCOVER_TIMEOUT)=" > "$NEW_CONF_FILE"
 
 if [[ $IS_PI5 -eq 1 ]]; then
