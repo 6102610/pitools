@@ -65,10 +65,11 @@ if [ ${#ACTIVE_IPS[@]} -eq 0 ]; then
     exit 0
 fi
 
-echo "[+] Trovati ${#ACTIVE_IPS[@]} host con porta 22 aperta."
 echo "----------------------------------------------------------------------------------"
 printf "%-16s %-18s %-25s %-20s %s\n" "IP ADDRESS" "MAC ADDRESS" "VENDOR / BANNER" "HOSTNAME" "NOTE"
 echo "----------------------------------------------------------------------------------"
+
+PI_COUNT=0
 
 for IP in "${ACTIVE_IPS[@]}"; do
     MAC=""
@@ -81,8 +82,15 @@ for IP in "${ACTIVE_IPS[@]}"; do
     fi
     MAC=${MAC:-"<non in arp>"}
 
-    # Recupera il banner SSH se disponibile
-    BANNER=$(timeout 0.8 nc -nv -w 1 "$IP" 22 2>&1 | grep -i "SSH" | head -n1 | tr -d '\r' || true)
+    # FIX BANNER: Aggiunto '-a' (tratta come testo) per bypassare l'errore file binario su Dropbear
+    BANNER=$(timeout 0.8 nc -nv -w 1 "$IP" 22 2>&1 | grep -a -i "SSH" | head -n1 | tr -d '\r' || true)
+
+    # FIX FILTER: Esclude host non-Raspberry tramite MAC OUI e che non usano OpenSSH (es. Dropbear)
+    if [[ ! "$MAC" =~ ^($RPI_OUI) ]] && [[ ! "$BANNER" =~ OpenSSH ]]; then
+        continue
+    fi
+
+    ((PI_COUNT++))
 
     # Risoluzione hostname
     HOST=$(timeout 0.5 getent hosts "$IP" 2>/dev/null | awk '{print $2}' || true)
@@ -91,12 +99,9 @@ for IP in "${ACTIVE_IPS[@]}"; do
         HOST=${HOST:-"-"}
     fi
 
-    # Marcatura Raspberry Pi
-    TAG=""
-    if [[ "$MAC" =~ ^($RPI_OUI) ]] || [[ "$BANNER" =~ [Uu]buntu|[Dd]ebian|[Rr]aspbian ]] || [[ "$HOST" =~ pi ]]; then
-        TAG="[POSSIBILE PI]"
-    fi
+    TAG="[RASPBERRY PI]"
 
     printf "%-16s %-18s %-25s %-20s %s\n" "$IP" "$MAC" "${BANNER:0:24}" "${HOST:0:19}" "$TAG"
 done
 echo "----------------------------------------------------------------------------------"
+echo "[+] Trovati $PI_COUNT Raspberry Pi confermati."
