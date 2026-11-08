@@ -116,6 +116,9 @@ setup_venv() {
     pip install rich pyyaml ansible --quiet
 }
 run_with_spinner "Creazione Virtualenv e dipendenze" setup_venv
+  for bin in ansible ansible-playbook ansible-galaxy; do 
+    [ -f "$VENV_DIR/bin/$bin" ] && sudo ln -sf "$VENV_DIR/bin/$bin" "/usr/local/bin/$bin" 
+  done
 
 # Input credenziali da terminale attivo
 echo ""
