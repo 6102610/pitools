@@ -19,28 +19,21 @@ if [[ -f /proc/device-tree/model ]]; then
     fi
 fi
 
-if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    CURRENT_OS="${PRETTY_NAME:-Linux}"
-else
-    CURRENT_OS="Linux (Sconosciuto)"
-fi
-
 echo "=========================================================="
 echo "    Setup Boot Sequenziale Multi-Piattaforma"
 echo "    Hardware Rilevato : $BOARD_MODEL"
-echo "    SO Rilevato       : $CURRENT_OS"
 echo "=========================================================="
 
 ROOT_DEV=$(findmnt -n -o SOURCE /)
 if [[ "$ROOT_DEV" != *mmcblk0* ]]; then
     echo "[WARN] Attenzione: il sistema non risulta avviato da microSD (root su $ROOT_DEV)."
-    read -rp "Vuoi proseguire comunque? (s/N): " CONFIRM
+    read -rp "Vuoi proseguire comunque? (s/N): " CONFIRM </dev/tty
     [[ "$CONFIRM" =~ ^[sS]$ ]] || exit 1
 else
     echo "[OK] Sistema avviato correttamente da microSD ($ROOT_DEV)."
 fi
 
+# Rilevamento partizione boot esterna (USB o NVMe)
 EXT_BOOT_DEV=""
 for dev in /dev/sd[a-z]1 /dev/nvme[0-9]n[0-9]p1; do
     if [[ -b "$dev" ]]; then
@@ -55,91 +48,148 @@ if [[ -z "$EXT_BOOT_DEV" ]]; then
 fi
 echo "[OK] Rilevata partizione boot di destinazione: $EXT_BOOT_DEV"
 
-# Configurazione PCIe Gen 3 e USB (specifica Pi 5)
+# -----------------------------------------------------------------
+# Raccolta Interattiva Credenziali (Lettura forzata da /dev/tty)
+# -----------------------------------------------------------------
+echo ""
+echo "=========================================================="
+echo "       Configurazione Interattiva Utente e Rete"
+echo "=========================================================="
+
+# 1. Username
+DEFAULT_USER="giorgio"
+read -rp "Nome utente da creare [$DEFAULT_USER]: " INPUT_USER </dev/tty
+TARGET_USER="${INPUT_USER:-$DEFAULT_USER}"
+
+# 2. Password
+PASSWORD_HASH=""
+while true; do
+    read -rsp "Password per l'utente $TARGET_USER: " PWD1 </dev/tty
+    echo ""
+    read -rsp "Conferma password: " PWD2 </dev/tty
+    echo ""
+    if [[ -n "$PWD1" && "$PWD1" == "$PWD2" ]]; then
+        PASSWORD_HASH=$(openssl passwd -6 "$PWD1")
+        break
+    else
+        echo "[!] Le password non coincidono o sono vuote. Riprova."
+    fi
+done
+
+# 3. Chiave SSH
+DETECTED_SSH_KEY=""
+for k in /home/*/.ssh/id_ed25519.pub /home/*/.ssh/id_rsa.pub /home/*/.ssh/authorized_keys /root/.ssh/id_*.pub; do
+    if [[ -f "$k" ]]; then
+        DETECTED_SSH_KEY=$(head -n 1 "$k")
+        break
+    fi
+done
+
+SSH_AUTHORIZED_KEY=""
+if [[ -n "$DETECTED_SSH_KEY" ]]; then
+    echo "[*] Trovata chiave SSH locale: ${DETECTED_SSH_KEY:0:45}..."
+    read -rp "Vuoi utilizzare questa chiave SSH? (S/n): " USE_DETECTED </dev/tty
+    if [[ ! "$USE_DETECTED" =~ ^[nN]$ ]]; then
+        SSH_AUTHORIZED_KEY="$DETECTED_SSH_KEY"
+    fi
+fi
+
+if [[ -z "$SSH_AUTHORIZED_KEY" ]]; then
+    read -rp "Incolla chiave pubblica SSH (lascia vuoto per disabilitare): " CUSTOM_SSH </dev/tty
+    SSH_AUTHORIZED_KEY="$CUSTOM_SSH"
+fi
+
+# 4. Rete Wi-Fi (opzionale)
+echo ""
+read -rp "Configurare connessione Wi-Fi? (s/N): " SETUP_WIFI </dev/tty
+WIFI_SSID=""
+WIFI_PASSWORD=""
+if [[ "$SETUP_WIFI" =~ ^[sS]$ ]]; then
+    read -rp "SSID Rete Wi-Fi: " WIFI_SSID </dev/tty
+    read -rsp "Password Wi-Fi: " WIFI_PASSWORD </dev/tty
+    echo ""
+fi
+
+# -----------------------------------------------------------------
+# Montaggio Storage Esterno e Iniezione Cloud-Init
+# -----------------------------------------------------------------
+echo ""
+echo "[*] Montaggio dello storage esterno $EXT_BOOT_DEV..."
+MOUNT_DIR=$(mktemp -d)
+mount "$EXT_BOOT_DEV" "$MOUNT_DIR"
+
+echo "[*] Generazione file user-data per cloud-init..."
+
+cat << CLOUD_EOF > "$MOUNT_DIR/user-data"
+#cloud-config
+hostname: pi5
+manage_etc_hosts: true
+
+users:
+  - name: ${TARGET_USER}
+    gecos: ${TARGET_USER}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [adm, sudo, dialout, cdrom, audio, video, plugdev, games, users, input, netdev]
+    lock_passwd: false
+    passwd: "${PASSWORD_HASH}"
+$(if [[ -n "$SSH_AUTHORIZED_KEY" ]]; then echo "    ssh_authorized_keys:"; echo "      - \"${SSH_AUTHORIZED_KEY}\""; fi)
+
+ssh_pwauth: true
+package_update: false
+package_upgrade: false
+CLOUD_EOF
+
+# Iniezione configurazione Wi-Fi se fornita
+if [[ -n "$WIFI_SSID" && -n "$WIFI_PASSWORD" ]]; then
+cat << CLOUD_NET >> "$MOUNT_DIR/user-data"
+
+write_files:
+  - path: /etc/netplan/50-cloud-init-wifi.yaml
+    permissions: '0600'
+    content: |
+      network:
+        version: 2
+        wifis:
+          wlan0:
+            dhcp4: true
+            access-points:
+              "${WIFI_SSID}":
+                password: "${WIFI_PASSWORD}"
+CLOUD_NET
+fi
+
+touch "$MOUNT_DIR/meta-data"
+chmod 644 "$MOUNT_DIR/user-data" "$MOUNT_DIR/meta-data"
+echo "[OK] user-data e meta-data generati con successo."
+
+# Abilitazione cgroups in cmdline.txt per K3s
+if [[ -f "$MOUNT_DIR/cmdline.txt" ]]; then
+    if ! grep -q "cgroup_enable=cpuset" "$MOUNT_DIR/cmdline.txt"; then
+        echo "[*] Iniezione parametri cgroups in cmdline.txt..."
+        sed -i 's/$/ cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory/' "$MOUNT_DIR/cmdline.txt"
+    fi
+fi
+
+# Parametri PCIe Gen 3 se Pi 5
 if [[ $IS_PI5 -eq 1 ]]; then
-    echo "[*] Configurazione PCIe Gen 3 (8 GT/s) e corrente USB..."
-
-    apply_pi5_boot_params() {
-        local boot_dir="$1"
-        local cfg_file="$boot_dir/config.txt"
-        local user_file="$boot_dir/usercfg.txt"
-
-        [[ -f "$cfg_file" ]] || touch "$cfg_file"
-
-        # Iniezione sicura su config.txt primario
-        for param in "usb_max_current_enable=1" "dtparam=pciex1" "dtparam=pciex1_gen=3"; do
-            if ! grep -q "^${param}" "$cfg_file"; then
-                echo "$param" >> "$cfg_file"
-            fi
-        done
-
-        # Se esiste usercfg.txt (Ubuntu), allinea anche quello ed assicurati l'include
-        if [[ -f "$user_file" ]]; then
+    for cfg in "$MOUNT_DIR/config.txt" "$MOUNT_DIR/usercfg.txt"; do
+        if [[ -f "$cfg" ]]; then
             for param in "usb_max_current_enable=1" "dtparam=pciex1" "dtparam=pciex1_gen=3"; do
-                if ! grep -q "^${param}" "$user_file"; then
-                    echo "$param" >> "$user_file"
-                fi
+                grep -q "^${param}" "$cfg" || echo "$param" >> "$cfg"
             done
-            if ! grep -q "^include usercfg.txt" "$cfg_file"; then
-                echo "include usercfg.txt" >> "$cfg_file"
-            fi
         fi
-    }
-
-    # 1. Su microSD locale
-    LOCAL_BOOT_DIR="/boot/firmware"
-    [[ ! -d "$LOCAL_BOOT_DIR" && -d "/boot" ]] && LOCAL_BOOT_DIR="/boot"
-    apply_pi5_boot_params "$LOCAL_BOOT_DIR"
-    echo "[OK] Parametri PCIe Gen 3 configurati su microSD locale."
-
-    # 2. Su storage esterno montato
-    MOUNT_DIR=$(mktemp -d)
-    mount "$EXT_BOOT_DEV" "$MOUNT_DIR"
-    apply_pi5_boot_params "$MOUNT_DIR"
-    sync
-    umount "$MOUNT_DIR"
-    rmdir "$MOUNT_DIR"
-    echo "[OK] Parametri PCIe Gen 3 configurati su storage esterno ($EXT_BOOT_DEV)."
-else
-    echo "[INFO] Raspberry Pi 4: parametri PCIe Gen 3 non applicabili."
+    done
 fi
 
-# Stabilizzazione rete
-echo "[*] Configurazione identificatore client DHCP MAC..."
-if command -v nmcli >/dev/null 2>&1 || systemctl is-active NetworkManager >/dev/null 2>&1; then
-    mkdir -p /etc/NetworkManager/conf.d
-    cat << 'NM_CONF' > /etc/NetworkManager/conf.d/10-hardware-mac.conf
-[connection]
-ipv4.dhcp-client-id=mac
-ethernet.cloned-mac-address=preserve
-wifi.cloned-mac-address=preserve
-wifi.scan-rand-mac-address=no
-NM_CONF
-fi
+sync
+umount "$MOUNT_DIR"
+rmdir "$MOUNT_DIR"
+echo "[OK] Storage esterno configurato e smontato con successo."
 
-if [[ -d /etc/netplan ]]; then
-    mkdir -p /etc/netplan
-    cat << 'NETPLAN_CONF' > /etc/netplan/99-dhcp-mac.yaml
-network:
-  version: 2
-  ethernets:
-    all-eth:
-      match:
-        name: "eth*"
-      dhcp4: true
-      dhcp4-overrides:
-        use-client-id: true
-  wifis:
-    all-wifi:
-      match:
-        name: "wlan*"
-      dhcp4: true
-      dhcp4-overrides:
-        use-client-id: true
-NETPLAN_CONF
-fi
-
-# EEPROM Firmware
+# -----------------------------------------------------------------
+# Configurazione EEPROM Bootloader
+# -----------------------------------------------------------------
 echo "[*] Configurazione EEPROM firmware..."
 if ! command -v rpi-eeprom-config >/dev/null 2>&1; then
     apt-get update -qq && apt-get install -y -qq rpi-eeprom || apt-get install -y -qq libraspberrypi-bin
@@ -167,7 +217,7 @@ fi
 
 rpi-eeprom-config --apply "$NEW_CONF_FILE"
 rm -f "$NEW_CONF_FILE"
-echo "[OK] EEPROM aggiornata."
+echo "[OK] EEPROM aggiornata con successo."
 
 echo "=========================================================="
 echo " Setup completato. Riavvio in corso..."
