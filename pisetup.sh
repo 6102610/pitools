@@ -304,6 +304,16 @@ fi
 
 chmod 644 "$MOUNT_DIR/user-data" "$MOUNT_DIR/meta-data" "$MOUNT_DIR/network-config"
 
+# Fix Ubuntu 26.04+ (layout current/ e bug autoboot.txt tryboot_a_b su boot USB/NVMe)
+if [[ -f "$MOUNT_DIR/autoboot.txt" ]]; then
+    rm -f "$MOUNT_DIR/autoboot.txt"
+    echo "[OK] Rimosso autoboot.txt (fix loop USB-MSD tryboot_a_b)."
+fi
+if [[ -d "$MOUNT_DIR/current" ]]; then
+    cp -f "$MOUNT_DIR/user-data" "$MOUNT_DIR/meta-data" "$MOUNT_DIR/network-config" "$MOUNT_DIR/current/"
+    echo "[OK] File cloud-init replicati in /current/ per compatibilita os_prefix."
+fi
+
 # Configurazione PCIe Gen 3 e corrente USB se Raspberry Pi 5
 if [[ $IS_PI5 -eq 1 ]]; then
     for cfg in "$MOUNT_DIR/config.txt" "$MOUNT_DIR/usercfg.txt"; do
