@@ -283,11 +283,14 @@ version: 2
 ethernets:
   eth0:
     dhcp4: true
+    dhcp-identifier: mac
     optional: true
 wifis:
   wlan0:
     dhcp4: true
+    dhcp-identifier: mac
     optional: true
+    regulatory-domain: "IT"
     access-points:
       "${WIFI_SSID}":
         password: "${WIFI_PASSWORD}"
