@@ -309,8 +309,9 @@ chmod 644 "$MOUNT_DIR/user-data" "$MOUNT_DIR/meta-data" "$MOUNT_DIR/network-conf
 
 # Fix stabilita NVMe (evita D3cold e timeout ASPM su SSD DRAM-less come WD SN740)
 for cmdf in "$MOUNT_DIR/cmdline.txt" "$MOUNT_DIR/current/cmdline.txt"; do
-    if [[ -f "$cmdf" ]] && ! grep -q "pcie_aspm=off" "$cmdf"; then
-        sed -i "s/$/ nvme_core.default_ps_max_latency_us=0 pcie_aspm=off pcie_port_pm=off/" "$cmdf"
+    if [[ -f "$cmdf" ]] && ! grep -q "pcie_port_pm=off" "$cmdf"; then
+        CLEAN_LINE=$(tr -d "\n\r" < "$cmdf")
+        echo "${CLEAN_LINE} nvme_core.default_ps_max_latency_us=0 pcie_aspm=off pcie_port_pm=off" > "$cmdf"
     fi
 done
 
@@ -333,7 +334,7 @@ if [[ $IS_PI5 -eq 1 ]]; then
             done
         fi
     done
-    echo "[OK] Parametri PCIe Gen 3 e USB Max Current applicati su Pi 5."
+    echo "[OK] Parametri PCIe Gen 2 e USB Max Current applicati su Pi 5."
 fi
 
 sync
