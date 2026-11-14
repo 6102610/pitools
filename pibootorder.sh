@@ -94,7 +94,7 @@ rm -f "$NEW_CONF_FILE"
 if [[ $IS_PI5 -eq 1 ]]; then
     for cfg in /boot/firmware/config.txt /boot/config.txt; do
         if [[ -f "$cfg" ]]; then
-            for param in "dtparam=pciex1" "dtparam=pciex1_gen=3"; do
+            for param in "dtparam=pciex1"; do
                 grep -q "^${param}" "$cfg" || echo "$param" >> "$cfg"
             done
         fi

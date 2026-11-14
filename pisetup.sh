@@ -304,6 +304,13 @@ fi
 
 chmod 644 "$MOUNT_DIR/user-data" "$MOUNT_DIR/meta-data" "$MOUNT_DIR/network-config"
 
+# Fix stabilita NVMe (evita D3cold e timeout ASPM su SSD DRAM-less come WD SN740)
+for cmdf in "$MOUNT_DIR/cmdline.txt" "$MOUNT_DIR/current/cmdline.txt"; do
+    if [[ -f "$cmdf" ]] && ! grep -q "pcie_aspm=off" "$cmdf"; then
+        sed -i "s/$/ nvme_core.default_ps_max_latency_us=0 pcie_aspm=off pcie_port_pm=off/" "$cmdf"
+    fi
+done
+
 # Fix Ubuntu 26.04+ (layout current/ e bug autoboot.txt tryboot_a_b su boot USB/NVMe)
 if [[ -f "$MOUNT_DIR/autoboot.txt" ]]; then
     rm -f "$MOUNT_DIR/autoboot.txt"
@@ -318,7 +325,7 @@ fi
 if [[ $IS_PI5 -eq 1 ]]; then
     for cfg in "$MOUNT_DIR/config.txt" "$MOUNT_DIR/usercfg.txt"; do
         if [[ -f "$cfg" ]]; then
-            for param in "usb_max_current_enable=1" "dtparam=pciex1" "dtparam=pciex1_gen=3"; do
+            for param in "usb_max_current_enable=1" "dtparam=pciex1"; do
                 grep -q "^${param}" "$cfg" || echo "$param" >> "$cfg"
             done
         fi
