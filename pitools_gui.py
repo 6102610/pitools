@@ -400,6 +400,7 @@ class PiToolsGUI:
         self._toggle_auth_fields()
         self._refresh_env_badge()
         self.root.after(100, self._process_ui_queue)
+        self.root.after(250, self.start_scan)
 
     def _build_ui(self):
         pad = {"padx": 8, "pady": 5}
@@ -517,18 +518,23 @@ class PiToolsGUI:
             variable=self.auto_reboot_var,
         ).pack(side="left", padx=16)
 
-        self.btn_upgrade = ttk.Button(
-            action_frame, text="Lancia Upgrade sui Selezionati (pisetup.sh)", command=self.start_upgrade
+        self.btn_poweroff = ttk.Button(
+            action_frame, text="Spegni (poweroff)", command=self.start_poweroff
         )
-        self.btn_upgrade.pack(side="right", padx=4)
+        self.btn_poweroff.pack(side="right", padx=4)
+
+        self.btn_upgrade = ttk.Button(
+            action_frame, text="Upgrade (pisetup.sh)", command=self.start_upgrade
+        )
+        self.btn_upgrade.pack(side="right", padx=6)
 
         self.btn_bootorder = ttk.Button(
-            action_frame, text="Cambia Boot Order (pibootorder.sh)", command=self.open_bootorder_dialog
+            action_frame, text="Boot Order (pibootorder.sh)", command=self.open_bootorder_dialog
         )
         self.btn_bootorder.pack(side="right", padx=6)
 
         self.btn_verify = ttk.Button(
-            action_frame, text="Verifica Selezionati (piverify.sh)", command=self.start_verify
+            action_frame, text="Verifica (piverify.sh)", command=self.start_verify
         )
         self.btn_verify.pack(side="right", padx=6)
 
@@ -566,6 +572,7 @@ class PiToolsGUI:
         self.btn_verify.configure(state=st)
         self.btn_bootorder.configure(state=st)
         self.btn_upgrade.configure(state=st)
+        self.btn_poweroff.configure(state=st)
         self.btn_env_cfg.configure(state=st)
         self.btn_cancel.configure(state="normal" if busy else "disabled")
 
@@ -1420,6 +1427,62 @@ class PiToolsGUI:
         finally:
             self.ui_queue.put(("done", None))
 
+
+    # --- 5. Spegnimento Sicuro Nodi Selezionati (poweroff) ---
+    def start_poweroff(self):
+        if self.busy:
+            return
+        targets = sorted(self.selected_ips)
+        if not targets:
+            messagebox.showwarning("Nessun Pi selezionato", "Spunta almeno un Raspberry Pi da spegnere.")
+            return
+        if not self.use_ssh_key_var.get() and not self.user_var.get().strip():
+            messagebox.showerror("Credenziali mancanti", "Inserisci il nome utente SSH.")
+            return
+
+        msg = (
+            f"Confermi lo spegnimento immediato (sudo poweroff) di {len(targets)} nodo/i?\n\n"
+            + "\n".join(f"  • {ip}" for ip in targets)
+        )
+        if not messagebox.askyesno("Conferma Spegnimento Raspberry Pi", msg):
+            return
+
+        self._set_busy(True)
+        threading.Thread(target=self._poweroff_worker, args=(targets,), daemon=True).start()
+
+    def _poweroff_worker(self, targets: list[str]):
+        try:
+            for ip in targets:
+                if self.cancel_event.is_set():
+                    break
+                self.ui_queue.put(("update_status", (ip, "Spegnimento...")))
+                self.log(f"\n=== [{ip}] Invio comando di arresto (systemctl poweroff) ===")
+                client = None
+                try:
+                    client, sudo_pass = self._connect_ssh(ip)
+                    sudo_cmd = 'sudo -p "[PT_SUDO] "' if sudo_pass else "sudo -n"
+                    cmd = f'{sudo_cmd} systemctl poweroff -i || {sudo_cmd} poweroff'
+
+                    rc, out = self._run_remote_pty(client, ip, cmd, sudo_pass, idle_timeout=20.0)
+                    if rc == 0 or (rc == -1 and "sudo:" not in out.lower()):
+                        self.ui_queue.put(("update_status", (ip, "Spento [OK]")))
+                        self.log(f"[OK] Arresto preso in carico da systemd su {ip}.")
+                    else:
+                        self.ui_queue.put(("update_status", (ip, f"Errore (rc={rc})")))
+                        self.log(f"[ERRORE {ip}] Spegnimento rifiutato (rc={rc}). Verifica Password Sudo.")
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if any(k in err_str for k in ("closed", "eof", "reset by peer")):
+                        self.ui_queue.put(("update_status", (ip, "Spento [OK]")))
+                        self.log(f"[OK] Connessione chiusa per arresto del sistema su {ip}.")
+                    else:
+                        self.log(f"[ERRORE {ip}] Spegnimento fallito: {e}")
+                        self.ui_queue.put(("update_status", (ip, "Fallito")))
+                finally:
+                    if client:
+                        client.close()
+        finally:
+            self.ui_queue.put(("done", None))
 
 if __name__ == "__main__":
     root = tk.Tk()
