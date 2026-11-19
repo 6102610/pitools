@@ -554,7 +554,8 @@ class PiToolsGUI:
         state = "disabled" if self.use_ssh_key_var.get() else "normal"
         self.entry_user.configure(state=state)
         self.entry_pass.configure(state=state)
-        self.entry_sudo.configure(state=state)
+        # Lascia Password Sudo sempre editabile (utile con Chiave SSH su Pi Imager Debian Trixie)
+        self.entry_sudo.configure(state="normal")
 
     def _set_busy(self, busy: bool):
         self.busy = busy
@@ -894,6 +895,11 @@ class PiToolsGUI:
             messagebox.showerror("Subnet non valida", "Formato atteso: es. 192.168.0.0/24")
             return
 
+        # Pulisce subito la tabella e le selezioni precedenti prima della nuova scansione
+        self.selected_ips.clear()
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+
         self._set_busy(True)
         threading.Thread(target=self._scan_worker, args=(subnet,), daemon=True).start()
 
@@ -991,7 +997,7 @@ class PiToolsGUI:
             )
             if client.get_transport():
                 client.get_transport().set_keepalive(10)
-            return client, ""
+            return client, self.sudo_var.get()
         else:
             client.connect(
                 ip,
