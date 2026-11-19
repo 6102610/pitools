@@ -315,10 +315,10 @@ for cmdf in "$MOUNT_DIR/cmdline.txt" "$MOUNT_DIR/current/cmdline.txt"; do
     fi
 done
 
-# Fix Ubuntu 26.04+ (layout current/ e bug autoboot.txt tryboot_a_b su boot USB/NVMe)
-if [[ -f "$MOUNT_DIR/autoboot.txt" ]]; then
+# Fix Ubuntu 26.04+ (mantiene autoboot.txt su Pi 5 NVMe; rimuove solo su Pi 4 USB-MSD)
+if [[ $IS_PI4 -eq 1 ]] && [[ -f "$MOUNT_DIR/autoboot.txt" ]]; then
     rm -f "$MOUNT_DIR/autoboot.txt"
-    echo "[OK] Rimosso autoboot.txt (fix loop USB-MSD tryboot_a_b)."
+    echo "[OK] Rimosso autoboot.txt su Pi 4 (fix loop USB-MSD tryboot_a_b)."
 fi
 if [[ -d "$MOUNT_DIR/current" ]]; then
     cp -f "$MOUNT_DIR/user-data" "$MOUNT_DIR/meta-data" "$MOUNT_DIR/network-config" "$MOUNT_DIR/current/"
@@ -337,6 +337,7 @@ if [[ $IS_PI5 -eq 1 ]]; then
     echo "[OK] Parametri PCIe Gen 2 e USB Max Current applicati su Pi 5."
 fi
 
+[[ -f "$MOUNT_DIR/config.txt" ]] && cp -f "$MOUNT_DIR/config.txt" "$MOUNT_DIR/tryboot.txt"
 sync
 umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"
